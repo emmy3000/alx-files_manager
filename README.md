@@ -121,6 +121,21 @@ module.exports = {
 
 A configuration file for Babel, a tool used to transform (or transpile) modern JavaScript code into backward-compatible versions to ensure compatibility across different browsers or environments. This file specifies settings for Babel's transformation process.
 
+```javascript
+module.exports = {
+    presets: [
+      [
+        '@babel/preset-env',
+        {
+          targets: {
+            node: 'current',
+          },
+        },
+      ],
+    ],
+};
+```
+
 ## Dependencies Installation
 
 Execute the npm installation command to set up the project's tools and dependencies saved in the `package.json` file:
