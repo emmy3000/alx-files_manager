@@ -138,7 +138,7 @@ module.exports = {
 
 ## Dependencies Installation
 
-Execute the npm installation command to set up the project's tools and dependencies saved in the `package.json` file:
+Execute the npm installation command to set up the project's development tools and dependencies saved in the `package.json` file:
 
 ```shell
 npm install
