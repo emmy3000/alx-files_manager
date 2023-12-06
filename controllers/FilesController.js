@@ -1,80 +1,75 @@
 #!/usr/bin/env node
-// controllers/FilesController.js
-// Handles file-related functionalities, including upload, publishing, and unpublishing.
-// Validates user authentication, input parameters, and file conditions.
-// Stores files locally and updates the file document in the database.
+// Handle file upload functionality, creating new files in the database and on disk.
+// Validates user authentication, input parameters, and parent file conditions.
+// Stores files locally in the specified or default folder path and updates the file document in the database.
+// Initiates background processing for generating thumbnails for image files.
+// Retrieves file data and serves different thumbnail sizes based on user requests.
 
-// controllers/FilesController.js
-
-import fs from 'fs';
-import mime from 'mime-types';
-import { v4 as uuidv4 } from 'uuid';
 import dbClient from '../utils/db';
 import redisClient from '../utils/redis';
+import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import bull from 'bull';
+
+const fileQueue = new bull('fileQueue');
 
 class FilesController {
   static async postUpload(req, res) {
-    try {
-      const { 'x-token': token } = req.headers;
-      const { name, type, parentId = 0, isPublic = false, data } = req.body;
+    const { 'x-token': token } = req.headers;
+    const { name, type, parentId = 0, isPublic = false, data } = req.body;
 
-      // Retrieve the user based on the token
-      const userId = await redisClient.get(`auth_${token}`);
-      if (!userId) {
-        return res.status(401).json({ error: 'Unauthorized' });
+    const userId = await redisClient.get(`auth_${token}`);
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (!name) {
+      return res.status(400).json({ error: 'Missing name' });
+    }
+
+    if (!type || !['folder', 'file', 'image'].includes(type)) {
+      return res.status(400).json({ error: 'Missing type' });
+    }
+
+    if (type !== 'folder' && !data) {
+      return res.status(400).json({ error: 'Missing data' });
+    }
+
+    if (parentId !== 0) {
+      const parentFile = await dbClient.getFile(parentId);
+      if (!parentFile || parentFile.type !== 'folder') {
+        return res.status(400).json({ error: 'Parent is not a folder' });
       }
+    }
 
-      // Validate inputs
-      if (!name) {
-        return res.status(400).json({ error: 'Missing name' });
-      }
+    const newFile = {
+      userId,
+      name,
+      type,
+      isPublic,
+      parentId,
+    };
 
-      if (!type || !['folder', 'file', 'image'].includes(type)) {
-        return res.status(400).json({ error: 'Missing type' });
-      }
+    if (type === 'folder') {
+      const result = await dbClient.insertFile(newFile);
+      return res.status(201).json(result.ops[0]);
+    } else {
+      const folderPath = process.env.FOLDER_PATH || '/tmp/files_manager';
+      const filePath = `${folderPath}/${uuidv4()}`;
 
-      if (type !== 'folder' && !data) {
-        return res.status(400).json({ error: 'Missing data' });
-      }
+      fs.writeFileSync(filePath, Buffer.from(data, 'base64'));
 
-      // Check parentId
-      if (parentId !== 0) {
-        const parentFile = await dbClient.getFile(parentId);
-        if (!parentFile || parentFile.type !== 'folder') {
-          return res.status(400).json({ error: 'Parent is not a folder' });
-        }
-      }
+      newFile.localPath = filePath;
 
-      // Create file document
-      const newFile = {
+      const result = await dbClient.insertFile(newFile);
+
+      // Add a job to the fileQueue for thumbnail generation
+      fileQueue.add({
         userId,
-        name,
-        type,
-        isPublic,
-        parentId,
-      };
+        fileId: result.ops[0].id,
+      });
 
-      if (type === 'folder') {
-        // If it's a folder, add the new file document in the DB and return it
-        const result = await dbClient.insertFile(newFile);
-        return res.status(201).json(result.ops[0]);
-      } else {
-        // If it's a file or image, store it locally
-        const folderPath = process.env.FOLDER_PATH || '/tmp/files_manager';
-        const filePath = `${folderPath}/${uuidv4()}`;
-
-        fs.writeFileSync(filePath, Buffer.from(data, 'base64'));
-
-        // Add localPath to newFile
-        newFile.localPath = filePath;
-
-        // Add the new file document in the collection files
-        const result = await dbClient.insertFile(newFile);
-        return res.status(201).json(result.ops[0]);
-      }
-    } catch (error) {
-      console.error('Error uploading file:', error);
-      return res.status(500).json({ error: 'Internal Server Error' });
+      return res.status(201).json(result.ops[0]);
     }
   }
 
@@ -93,10 +88,8 @@ class FilesController {
         return res.status(404).json({ error: 'Not found' });
       }
 
-      // Update isPublic to true
       await dbClient.updateFileIsPublic(userId, id, true);
 
-      // Return the updated file document
       return res.status(200).json(await dbClient.getFileById(userId, id));
     } catch (error) {
       console.error('Error publishing file:', error);
@@ -119,10 +112,8 @@ class FilesController {
         return res.status(404).json({ error: 'Not found' });
       }
 
-      // Update isPublic to false
       await dbClient.updateFileIsPublic(userId, id, false);
 
-      // Return the updated file document
       return res.status(200).json(await dbClient.getFileById(userId, id));
     } catch (error) {
       console.error('Error unpublishing file:', error);
@@ -134,6 +125,7 @@ class FilesController {
     try {
       const { 'x-token': token } = req.headers;
       const { id } = req.params;
+      const { size } = req.query;
 
       const userId = await redisClient.get(`auth_${token}`);
       if (!userId) {
@@ -149,15 +141,12 @@ class FilesController {
         return res.status(400).json({ error: "A folder doesn't have content" });
       }
 
-      if (!fs.existsSync(file.localPath)) {
+      const thumbnailPath = `/tmp/files_manager/${id}_${size || 'original'}`;
+      if (!fs.existsSync(thumbnailPath)) {
         return res.status(404).json({ error: 'Not found' });
       }
 
-      const fileContent = fs.readFileSync(file.localPath, 'utf-8');
-      const mimeType = mime.lookup(file.name);
-
-      res.setHeader('Content-Type', mimeType);
-      res.status(200).send(fileContent);
+      return res.sendFile(thumbnailPath);
     } catch (error) {
       console.error('Error getting file data:', error);
       return res.status(500).json({ error: 'Internal Server Error' });
