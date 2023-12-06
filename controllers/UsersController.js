@@ -1,33 +1,53 @@
 #!/usr/bin/env node
-
-import dbClient from '../utils/db';
-
 /**
  * @file controllers/UsersController.js
  * @description Controller handling user-related endpoints.
  * Contains methods for retrieving user details (GET /users/me) based on authentication token.
  */
+
+// controllers/UsersController.js
+
+import dbClient from '../utils/db';
+import { v4 as uuidv4 } from 'uuid';
+import bcrypt from 'bcrypt';
+import userQueue from '../worker';
+
 class UsersController {
-  static async getMe(req, res) {
-    const { 'x-token': token } = req.headers;
+  static async postNew(req, res) {
+    const { email, password } = req.body;
 
-    if (!token) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    // Validate inputs
+    if (!email) {
+      return res.status(400).json({ error: 'Missing email' });
     }
 
-    const userId = await redisClient.get(`auth_${token}`);
-
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (!password) {
+      return res.status(400).json({ error: 'Missing password' });
     }
 
-    const user = await dbClient.getUserById(userId);
-
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    // Check if the email already exists
+    const userExists = await dbClient.getUser(email);
+    if (userExists) {
+      return res.status(400).json({ error: 'Already exist' });
     }
 
-    return res.status(200).json({ id: user._id.toString(), email: user.email });
+    // Hash the password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user document
+    const newUser = {
+      email,
+      password: hashedPassword,
+    };
+
+    // Add the new user document in the DB
+    const result = await dbClient.insertUser(newUser);
+
+    // Add a job to the userQueue with the userId
+    await userQueue.add({ userId: result.ops[0]._id });
+
+    // Return the new user document
+    return res.status(201).json(result.ops[0]);
   }
 }
 
