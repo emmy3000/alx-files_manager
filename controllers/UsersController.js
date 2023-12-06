@@ -1,42 +1,33 @@
 #!/usr/bin/env node
-/**
- * @file controllers/UsersController.js
- * @description Defines the UsersController class responsible for handling user-related operations.
- * Contains the postNew method, which creates a new user by validating email and password,
- * checking for existing users, hashing the password, and responding with the new user's ID and email.
- */
 
 import dbClient from '../utils/db';
-import { pwdHashed } from '../utils/utils';
 
+/**
+ * @file controllers/UsersController.js
+ * @description Controller handling user-related endpoints.
+ * Contains methods for retrieving user details (GET /users/me) based on authentication token.
+ */
 class UsersController {
-  static async postNew(req, res) {
-    const { email, password } = req.body;
+  static async getMe(req, res) {
+    const { 'x-token': token } = req.headers;
 
-    if (!email) {
-      return res.status(400).json({ error: 'Missing email' });
+    if (!token) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    if (!password) {
-      return res.status(400).json({ error: 'Missing password' });
+    const userId = await redisClient.get(`auth_${token}`);
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const existingUser = await dbClient.getUser(email);
+    const user = await dbClient.getUserById(userId);
 
-    if (existingUser) {
-      return res.status(400).json({ error: 'Already exist' });
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const hashedPassword = pwdHashed(password);
-
-    const newUser = {
-      email,
-      password: hashedPassword,
-    };
-
-    const result = await dbClient.insertUser(newUser);
-
-    return res.status(201).json({ id: result.insertedId, email });
+    return res.status(200).json({ id: user._id.toString(), email: user.email });
   }
 }
 
