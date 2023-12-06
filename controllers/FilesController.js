@@ -4,17 +4,15 @@
 // Validates user authentication, input parameters, and file conditions.
 // Stores files locally and updates the file document in the database.
 
+// controllers/FilesController.js
+
+import fs from 'fs';
+import mime from 'mime-types';
+import { v4 as uuidv4 } from 'uuid';
 import dbClient from '../utils/db';
 import redisClient from '../utils/redis';
-import { v4 as uuidv4 } from 'uuid';
-import fs from 'fs';
 
 class FilesController {
-  /**
-   * Handles file upload functionality, creating new files in the database and on disk.
-   * Validates user authentication, input parameters, and parent file conditions.
-   * Stores files locally in the specified or default folder path and updates the file document in the database.
-   */
   static async postUpload(req, res) {
     try {
       const { 'x-token': token } = req.headers;
@@ -80,10 +78,6 @@ class FilesController {
     }
   }
 
-  /**
-   * Sets isPublic to true on the file document based on the ID.
-   * Retrieves the user based on the token, checks file existence, updates isPublic to true, and returns the updated file document.
-   */
   static async putPublish(req, res) {
     try {
       const { 'x-token': token } = req.headers;
@@ -110,10 +104,6 @@ class FilesController {
     }
   }
 
-  /**
-   * Sets isPublic to false on the file document based on the ID.
-   * Retrieves the user based on the token, checks file existence, updates isPublic to false, and returns the updated file document.
-   */
   static async putUnpublish(req, res) {
     try {
       const { 'x-token': token } = req.headers;
@@ -136,6 +126,40 @@ class FilesController {
       return res.status(200).json(await dbClient.getFileById(userId, id));
     } catch (error) {
       console.error('Error unpublishing file:', error);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  }
+
+  static async getFile(req, res) {
+    try {
+      const { 'x-token': token } = req.headers;
+      const { id } = req.params;
+
+      const userId = await redisClient.get(`auth_${token}`);
+      if (!userId) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+
+      const file = await dbClient.getFileById(userId, id);
+      if (!file || (!file.isPublic && file.userId !== userId)) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      if (file.type === 'folder') {
+        return res.status(400).json({ error: "A folder doesn't have content" });
+      }
+
+      if (!fs.existsSync(file.localPath)) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      const fileContent = fs.readFileSync(file.localPath, 'utf-8');
+      const mimeType = mime.lookup(file.name);
+
+      res.setHeader('Content-Type', mimeType);
+      res.status(200).send(fileContent);
+    } catch (error) {
+      console.error('Error getting file data:', error);
       return res.status(500).json({ error: 'Internal Server Error' });
     }
   }
